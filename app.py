@@ -4,6 +4,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 import os
+import re
 
 # 頁面配置
 st.set_page_config(
@@ -13,10 +14,9 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# 自訂 CSS 樣式 (隱藏透明頂點工具列，解放頂部空白)
+# 自訂 CSS 樣式 (隱藏透明頂部導覽列，一頁式緊湊排版)
 st.markdown("""
 <style>
-    /* 隱藏 Streamlit 原生頂部透明導覽列，徹底解決空白過大與文字裁切問題 */
     header[data-testid="stHeader"] {
         display: none !important;
     }
@@ -54,19 +54,26 @@ st.markdown("""
         margin-bottom: 4px;
     }
     .metric-value {
-        font-size: 18px;
+        font-size: 17px;
         font-weight: 700;
         color: #0f172a;
         margin-bottom: 4px;
     }
-    .metric-badge {
-        display: inline-block;
-        background-color: #dbeafe;
-        color: #1e40af;
-        font-size: 11px;
-        font-weight: 600;
-        padding: 1px 6px;
-        border-radius: 10px;
+    /* 💡 精準對齊的匯率雙欄容器 */
+    .rate-grid {
+        display: grid;
+        grid-template-columns: auto 1fr;
+        column-gap: 8px;
+        row-gap: 2px;
+        font-size: 15px;
+        font-weight: 700;
+        color: #0f172a;
+        margin-top: 4px;
+    }
+    .rate-label {
+        display: flex;
+        justify-content: space-between;
+        width: 85px; /* 鎖定文字區域寬度，實現兩端對齊 */
     }
     .current-month-badge {
         display: inline-block;
@@ -77,80 +84,119 @@ st.markdown("""
         padding: 1px 6px;
         border-radius: 10px;
     }
+    .metric-badge {
+        display: inline-block;
+        background-color: #dbeafe;
+        color: #1e40af;
+        font-size: 11px;
+        font-weight: 600;
+        padding: 1px 6px;
+        border-radius: 10px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# 載入與解析 Excel 資料
+# 載入與解析數據
 @st.cache_data(ttl=60)
 def load_v2_data():
-    file_name = "FCST匯總表_20260429.xlsx"
-    file_path = file_name
-    if not os.path.exists(file_path):
-        file_path = os.path.join(os.path.dirname(__file__), file_name)
+    file_path = None
     
-    if os.path.exists(file_path):
+    fcst_files = [
+        f for f in os.listdir('.') 
+        if f.startswith("FCST匯總表") and (f.endswith(".xlsx") or f.endswith(".xls"))
+    ]
+    
+    if fcst_files:
+        fcst_files.sort(key=lambda x: re.sub(r'\D', '', x), reverse=True)
+        file_path = fcst_files[0]
+    else:
+        for fallback in ["data.xlsx", "total.xlsx", "total.txt"]:
+            if os.path.exists(fallback):
+                file_path = fallback
+                break
+
+    if file_path and os.path.exists(file_path):
         xls = pd.ExcelFile(file_path)
         sheet_name = '汇总' if '汇总' in xls.sheet_names else 0
         df_hz = pd.read_excel(file_path, sheet_name=sheet_name, header=None)
         
-        # 讀取匯率
-        rmb_rate = float(df_hz.iloc[0, 3]) if pd.notna(df_hz.iloc[0, 3]) else 6.9194
-        ntd_rate = float(df_hz.iloc[1, 3]) if pd.notna(df_hz.iloc[1, 3]) else 31.335
+        # 自動抓取 Excel 上方的最新匯率 (Row 0 D欄: 人民幣, Row 1 D欄: 台幣/美金)
+        rmb_rate = float(df_hz.iloc[0, 3]) if pd.notna(df_hz.iloc[0, 3]) else 6.7894
+        ntd_rate = float(df_hz.iloc[1, 3]) if pd.notna(df_hz.iloc[1, 3]) else 32.4650
         
-        # 擷取明細數據列
-        df_data = df_hz.iloc[6:1533].copy()
+        row3 = df_hz.iloc[3].tolist()
+        row5 = df_hz.iloc[5].tolist()
+        
+        curr_year = "2025"
+        time_cols = []
+        cols_mapping = {}
+        
+        data_start_col = 7
+        for idx in range(data_start_col, len(row5)):
+            r3_val = str(row3[idx]).strip() if pd.notna(row3[idx]) else ""
+            r5_val = str(row5[idx]).strip() if pd.notna(row5[idx]) else ""
+            
+            if re.match(r'^20\d{2}$', r3_val):
+                curr_year = r3_val
+                
+            if '月' in r5_val and not any(k in r5_val for k in ['Total', 'TTL', '小計', '合計']):
+                mo_num = re.sub(r'\D', '', r5_val)
+                if mo_num:
+                    col_key = f"{curr_year}-{int(mo_num):02d}"
+                    time_cols.append(col_key)
+                    cols_mapping[idx] = col_key
+
+        df_data = df_hz.iloc[6:].copy()
         df_data[1] = df_data[1].ffill()
         
-        cols = [
-            'Index', 'Customer', 'HH_PN', 'Cust_PN', 'Category', 'UnitPrice', 'Currency',
-            '2025-01', '2025-02', '2025-03', '2025-04', '2025-05', '2025-06',
-            '2025-07', '2025-08', '2025-09', '2025-10', '2025-11', '2025-12', '2025_Total',
-            '2026-01', '2026-02', '2026-03', '2026-04', '2026-05', '2026-06',
-            '2026-07', '2026-08', '2026-09', '2026-10', '2026-11', '2026-12', '2026_Total',
-            '2027-01', '2027-02', '2027-03', '2027-04'
-        ]
-        df_data.columns = cols
+        clean_dict = {
+            'Customer': df_data[1].astype(str).str.strip(),
+            'HH_PN': df_data[2].astype(str).str.strip(),
+            'Cust_PN': df_data[3].astype(str).str.strip(),
+            'Category': df_data[4].fillna('未分類').astype(str).str.strip(),
+            'UnitPrice': pd.to_numeric(df_data[5].astype(str).str.replace(r'[^\d.]', '', regex=True), errors='coerce').fillna(0),
+            'Currency': df_data[6].astype(str).str.strip().str.upper()
+        }
         
-        # 清理欄位
-        df_data['Customer'] = df_data['Customer'].astype(str).str.strip()
-        df_data['Category'] = df_data['Category'].fillna('未分類').astype(str).str.strip()
-        df_data['Category'] = df_data['Category'].replace({'nan': '未分類', 'None': '未分類', '': '未分類'})
-        df_data['Currency'] = df_data['Currency'].astype(str).str.strip().str.upper()
-        df_data['UnitPrice'] = pd.to_numeric(df_data['UnitPrice'], errors='coerce').fillna(0)
-        
-        time_cols = [c for c in cols if ('2025-' in c or '2026-' in c or '2027-' in c) and '_Total' not in c]
-        for c in time_cols:
-            df_data[c] = pd.to_numeric(df_data[c], errors='coerce').fillna(0)
+        for c_idx, c_name in cols_mapping.items():
+            clean_dict[c_name] = pd.to_numeric(df_data[c_idx], errors='coerce').fillna(0)
             
+        clean_df = pd.DataFrame(clean_dict)
+        clean_df['Category'] = clean_df['Category'].replace({'nan': '未分類', 'None': '未分類', '': '未分類'})
+        
+        clean_df = clean_df[~clean_df['HH_PN'].str.contains(r'TOTAL|小計|合計|nan', case=False, na=False)]
+        clean_df = clean_df[~clean_df['Customer'].str.contains(r'TOTAL|小計|合計|nan', case=False, na=False)]
+
         def get_rate_factor(curr):
-            if curr == 'USD':
+            curr_str = str(curr).upper().strip()
+            if any(x in curr_str for x in ['USD', 'US$', '美元']):
                 return ntd_rate
-            elif curr == 'RMB':
+            elif any(x in curr_str for x in ['RMB', 'CNY', '人民幣']):
                 return ntd_rate / rmb_rate
             else:
                 return 1.0
                 
-        df_data['Rate_Factor'] = df_data['Currency'].apply(get_rate_factor)
+        clean_df['Rate_Factor'] = clean_df['Currency'].apply(get_rate_factor)
         
         for c in time_cols:
-            df_data[f'{c}_Rev'] = df_data[c] * df_data['UnitPrice'] * df_data['Rate_Factor']
+            clean_df[f'{c}_Rev'] = clean_df[c] * clean_df['UnitPrice'] * clean_df['Rate_Factor']
             
-        return df_data, time_cols, rmb_rate, ntd_rate
+        filename_str = os.path.basename(file_path)
+        match = re.search(r'(20\d{2})(\d{2})\d{2}', filename_str)
+        if match:
+            detected_mo = f"{match.group(1)}-{match.group(2)}"
+        else:
+            last_yr, last_mo = time_cols[-1].split('-')
+            detected_mo = f"{int(last_yr) - 1}-{last_mo}"
+            
+        return clean_df, time_cols, rmb_rate, ntd_rate, detected_mo, file_path
     else:
-        st.error(f"⚠️ 找不到檔案 `{file_name}`")
-        return pd.DataFrame(), [], 6.9194, 31.335
+        st.error(f"⚠️ 找不到資料檔案，請確認 Excel 檔案已上傳。")
+        return pd.DataFrame(), [], 6.7894, 32.4650, "2026-08", ""
 
-df_raw, time_cols, rmb_rate, ntd_rate = load_v2_data()
+df_raw, time_cols, rmb_rate, ntd_rate, current_mo_str, current_loaded_file = load_v2_data()
 
 if not df_raw.empty:
-    # 💡 自動推算「當前基準月份」邏輯：取表格最後一欄 (如 2027-04) 扣除 1 年 => 2026-04
-    last_time_col = time_cols[-1]
-    try:
-        last_yr, last_mo = last_time_col.split('-')
-        current_mo_str = f"{int(last_yr) - 1}-{last_mo}"
-    except Exception:
-        current_mo_str = "2026-04"
-
     # 主標題
     st.markdown('<div class="main-header">📊 MCD Forecast管理系統 V2</div>', unsafe_allow_html=True)
 
@@ -226,8 +272,21 @@ if not df_raw.empty:
     with m_col4:
         st.markdown(f'<div class="metric-card"><div class="metric-title">2026 H2 (7-12月)</div><div class="metric-value">{fmt_str.format(val_h2)}</div><div class="metric-badge">↑ 均 {fmt_str.format(avg_h2)}/月</div></div>', unsafe_allow_html=True)
 
+    # 💡 計算人民幣對台幣匯率 (RMB:NTD)
+    rmb_to_ntd = ntd_rate / rmb_rate if rmb_rate > 0 else 0
+
     with m_col5:
-        st.markdown(f'<div class="metric-card"><div class="metric-title">參考換算匯率</div><div class="metric-value">31.335</div><div class="metric-badge">USD={ntd_rate} | RMB={rmb_rate}</div></div>', unsafe_allow_html=True)
+        st.markdown(f'''
+        <div class="metric-card">
+            <div class="metric-title">參考換算匯率</div>
+            <div class="rate-grid">
+                <div class="rate-label"><span>美</span><span>金</span><span>匯</span><span>率</span></div>
+                <div>: {ntd_rate:.4f}</div>
+                <div class="rate-label"><span>人</span><span>民</span><span>幣</span><span>匯</span><span>率</span></div>
+                <div>: {rmb_to_ntd:.4f}</div>
+            </div>
+        </div>
+        ''', unsafe_allow_html=True)
 
     # ---------------- 功能頁籤 ----------------
     tab1, tab2, tab3 = st.tabs(["📈 月度走勢分析", "📋 明細數據表", "📊 機種/客戶貢獻度分析"])
